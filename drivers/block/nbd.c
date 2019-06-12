@@ -402,21 +402,12 @@ done:
 /*
  *  Send or receive packet.
  */
-static int sock_xmit(struct nbd_device *nbd, int index, int send,
+static int sock_xmit(struct socket *sock, int send,
 		     struct iov_iter *iter, int msg_flags, int *sent)
 {
-	struct nbd_config *config = nbd->config;
-	struct socket *sock = config->socks[index]->sock;
 	int result;
 	struct msghdr msg;
 	unsigned int noreclaim_flag;
-
-	if (unlikely(!sock)) {
-		dev_err_ratelimited(disk_to_dev(nbd->disk),
-			"Attempted %s on closed socket in sock_xmit\n",
-			(send ? "send" : "recv"));
-		return -EINVAL;
-	}
 
 	msg.msg_iter = *iter;
 
@@ -446,6 +437,22 @@ static int sock_xmit(struct nbd_device *nbd, int index, int send,
 	memalloc_noreclaim_restore(noreclaim_flag);
 
 	return result;
+}
+
+static int nbd_xmit(struct nbd_device *nbd, int index, int send,
+		     struct iov_iter *iter, int msg_flags, int *sent)
+{
+	struct nbd_config *config = nbd->config;
+	struct socket *sock = config->socks[index]->sock;
+
+	if (unlikely(!sock)) {
+		dev_err_ratelimited(disk_to_dev(nbd->disk),
+			"Attempted %s on closed socket in %s\n",
+			(send ? "send" : "recv"), __func__);
+		return -EINVAL;
+	}
+
+	return sock_xmit(sock, send, iter, msg_flags, sent);
 }
 
 /*
@@ -529,7 +536,7 @@ static int nbd_send_cmd(struct nbd_device *nbd, struct nbd_cmd *cmd, int index)
 	dev_dbg(nbd_to_dev(nbd), "request %p: sending control (%s@%llu,%uB)\n",
 		req, nbdcmd_to_ascii(type),
 		(unsigned long long)blk_rq_pos(req) << 9, blk_rq_bytes(req));
-	result = sock_xmit(nbd, index, 1, &from,
+	result = nbd_xmit(nbd, index, 1, &from,
 			(type == NBD_CMD_WRITE) ? MSG_MORE : 0, &sent);
 	if (result <= 0) {
 		if (was_interrupted(result)) {
@@ -575,7 +582,7 @@ send_pages:
 				iov_iter_advance(&from, skip);
 				skip = 0;
 			}
-			result = sock_xmit(nbd, index, 1, &from, flags, &sent);
+			result = nbd_xmit(nbd, index, 1, &from, flags, &sent);
 			if (result <= 0) {
 				if (was_interrupted(result)) {
 					/* We've already sent the header, we
@@ -626,7 +633,7 @@ static struct nbd_cmd *nbd_read_stat(struct nbd_device *nbd, int index)
 
 	reply.magic = 0;
 	iov_iter_kvec(&to, READ | ITER_KVEC, &iov, 1, sizeof(reply));
-	result = sock_xmit(nbd, index, 0, &to, MSG_WAITALL, NULL);
+	result = nbd_xmit(nbd, index, 0, &to, MSG_WAITALL, NULL);
 	if (result <= 0) {
 		if (!nbd_disconnected(config))
 			dev_err(disk_to_dev(nbd->disk),
@@ -681,7 +688,7 @@ static struct nbd_cmd *nbd_read_stat(struct nbd_device *nbd, int index)
 		rq_for_each_segment(bvec, req, iter) {
 			iov_iter_bvec(&to, ITER_BVEC | READ,
 				      &bvec, 1, bvec.bv_len);
-			result = sock_xmit(nbd, index, 0, &to, MSG_WAITALL, NULL);
+			result = nbd_xmit(nbd, index, 0, &to, MSG_WAITALL, NULL);
 			if (result <= 0) {
 				dev_err(disk_to_dev(nbd->disk), "Receive data failed (result %d)\n",
 					result);
@@ -920,18 +927,12 @@ static blk_status_t nbd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	return ret;
 }
 
-static int nbd_add_socket(struct nbd_device *nbd, unsigned long arg,
+static int nbd_add_socket(struct nbd_device *nbd, struct socket *sock,
 			  bool netlink)
 {
 	struct nbd_config *config = nbd->config;
-	struct socket *sock;
 	struct nbd_sock **socks;
 	struct nbd_sock *nsock;
-	int err;
-
-	sock = sockfd_lookup(arg, &err);
-	if (!sock)
-		return err;
 
 	if (!netlink && !nbd->task_setup &&
 	    !test_bit(NBD_BOUND, &config->runtime_flags))
@@ -971,6 +972,19 @@ static int nbd_add_socket(struct nbd_device *nbd, unsigned long arg,
 	atomic_inc(&config->live_connections);
 
 	return 0;
+}
+
+static int nbd_add_socket_fd(struct nbd_device *nbd, unsigned long arg,
+			  bool netlink)
+{
+	struct socket *sock;
+	int err;
+
+	sock = sockfd_lookup(arg, &err);
+	if (!sock)
+		return err;
+
+	return nbd_add_socket(nbd, sock, netlink);
 }
 
 static int nbd_reconnect_socket(struct nbd_device *nbd, unsigned long arg)
@@ -1076,7 +1090,7 @@ static void send_disconnects(struct nbd_device *nbd)
 
 		iov_iter_kvec(&from, WRITE | ITER_KVEC, &iov, 1, sizeof(request));
 		mutex_lock(&nsock->tx_lock);
-		ret = sock_xmit(nbd, i, 1, &from, 0, NULL);
+		ret = nbd_xmit(nbd, i, 1, &from, 0, NULL);
 		if (ret <= 0)
 			dev_err(disk_to_dev(nbd->disk),
 				"Send disconnect failed %d\n", ret);
@@ -1238,7 +1252,7 @@ static int __nbd_ioctl(struct block_device *bdev, struct nbd_device *nbd,
 		nbd_clear_sock_ioctl(nbd, bdev);
 		return 0;
 	case NBD_SET_SOCK:
-		return nbd_add_socket(nbd, arg, false);
+		return nbd_add_socket_fd(nbd, arg, false);
 	case NBD_SET_BLKSIZE:
 		if (!arg || !is_power_of_2(arg) || arg < 512 ||
 		    arg > PAGE_SIZE)
@@ -1808,7 +1822,7 @@ again:
 			if (!socks[NBD_SOCK_FD])
 				continue;
 			fd = (int)nla_get_u32(socks[NBD_SOCK_FD]);
-			ret = nbd_add_socket(nbd, fd, true);
+			ret = nbd_add_socket_fd(nbd, fd, true);
 			if (ret)
 				goto out;
 		}
