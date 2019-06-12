@@ -285,6 +285,25 @@ config BLK_DEV_NBD
 
 	  If unsure, say N.
 
+config BLK_DEV_NBDROOT
+	bool "Early network block device client support"
+	depends on BLK_DEV_NBD=y
+	---help---
+	  Saying yes will enable kernel NBD client support. This allows to
+	  connect entire disk with multiple partitions before mounting rootfs.
+
+	  The arguments for the server are passed via kernel command line.
+	  The kernel command line has the format
+	  'nbdroot=[<SERVER_IP>:]<SERVER_PORT>/<EXPORT_NAME>'.
+	  SERVER_IP is optional. If it is not available it will use the
+	  root_server_addr transmitted through DHCP.
+
+	  Based on those arguments, the connection to the server is established
+	  and is connected to the nbd0 device. The rootdevice therefore is
+	  root=/dev/nbd0.
+
+	  If unsure, say N.
+
 config BLK_DEV_SKD
 	tristate "STEC S1120 Block Driver"
 	depends on PCI
