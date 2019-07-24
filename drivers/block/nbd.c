@@ -468,14 +468,14 @@ static int sock_xmit(struct socket *sock, int send,
 	return result;
 }
 
-static int sock_xmit_buf(struct socket *sock, int send,
+static int sock_xmit_buf(struct socket *sock, unsigned int direction,
 			 void *buf, size_t size)
 {
 	struct iov_iter iter;
 	struct kvec iov = {.iov_base = buf, .iov_len = size};
 
 	iov_iter_kvec(&iter, WRITE | ITER_KVEC, &iov, 1, size);
-	return sock_xmit(sock, send, &iter, 0, 0);
+	return sock_xmit(sock, direction, &iter, 0, 0);
 }
 
 static int nbd_xmit(struct nbd_device *nbd, int index, int send,
@@ -2375,14 +2375,14 @@ static int nbd_connection_negotiate(struct socket *sock, char *export_name,
 	u32 name_len;
 	u64 nbd_size;
 
-	ret = sock_xmit_buf(sock, 0, buf, 8);
+	ret = sock_xmit_buf(sock, READ, buf, 8);
 	if (ret < 0)
 		return ret;
 
 	if (strncmp(buf, nbd_magic, 8))
 		return -EINVAL;
 
-	ret = sock_xmit_buf(sock, 0, &magic, sizeof(magic));
+	ret = sock_xmit_buf(sock, READ, &magic, sizeof(magic));
 	if (ret < 0)
 		return ret;
 	magic = be64_to_cpu(magic);
@@ -2390,7 +2390,7 @@ static int nbd_connection_negotiate(struct socket *sock, char *export_name,
 	if (magic != nbd_opts_magic)
 		return -EINVAL;
 
-	ret = sock_xmit_buf(sock, 0, &flags, sizeof(flags));
+	ret = sock_xmit_buf(sock, READ, &flags, sizeof(flags));
 	if (ret < 0)
 		return ret;
 
@@ -2398,41 +2398,41 @@ static int nbd_connection_negotiate(struct socket *sock, char *export_name,
 
 	client_flags = 0;
 
-	ret = sock_xmit_buf(sock, 1, &client_flags, sizeof(client_flags));
+	ret = sock_xmit_buf(sock, WRITE, &client_flags, sizeof(client_flags));
 	if (ret < 0)
 		return ret;
 
 	magic = cpu_to_be64(nbd_opts_magic);
-	ret = sock_xmit_buf(sock, 1, &magic, sizeof(magic));
+	ret = sock_xmit_buf(sock, WRITE, &magic, sizeof(magic));
 	if (ret < 0)
 		return ret;
 
 	opt = htonl(NBD_OPT_EXPORT_NAME);
-	ret = sock_xmit_buf(sock, 1, &opt, sizeof(opt));
+	ret = sock_xmit_buf(sock, WRITE, &opt, sizeof(opt));
 	if (ret < 0)
 		return ret;
 
 	name_len = strlen(export_name) + 1;
 	name_len = htonl(name_len);
-	ret = sock_xmit_buf(sock, 1, &name_len, sizeof(name_len));
+	ret = sock_xmit_buf(sock, WRITE, &name_len, sizeof(name_len));
 	if (ret < 0)
 		return ret;
 
-	ret = sock_xmit_buf(sock, 1, export_name, strlen(export_name) + 1);
+	ret = sock_xmit_buf(sock, WRITE, export_name, strlen(export_name) + 1);
 	if (ret < 0)
 		return ret;
 
-	ret = sock_xmit_buf(sock, 0, &nbd_size, sizeof(nbd_size));
+	ret = sock_xmit_buf(sock, READ, &nbd_size, sizeof(nbd_size));
 	if (ret < 0)
 		return ret;
 	nbd_size = be64_to_cpu(nbd_size);
 
-	ret = sock_xmit_buf(sock, 0, &flags, sizeof(flags));
+	ret = sock_xmit_buf(sock, READ, &flags, sizeof(flags));
 	if (ret < 0)
 		return ret;
 	*nflags = ntohs(flags);
 
-	ret = sock_xmit_buf(sock, 0, buf, 124);
+	ret = sock_xmit_buf(sock, READ, buf, 124);
 	if (ret < 0)
 		return ret;
 
